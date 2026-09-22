@@ -1,0 +1,23 @@
+[
+  "num__tenure",
+  "num__MonthlyCharges",
+  "num__charge_consistency_ratio",
+  "cat__gender_Male",
+  "cat__PhoneService_Yes",
+  "cat__MultipleLines_No phone service",
+  "cat__OnlineBackup_No",
+  "cat__DeviceProtection_No",
+  "cat__DeviceProtection_No internet service",
+  "cat__DeviceProtection_Yes",
+  "cat__TechSupport_No",
+  "cat__StreamingTV_No",
+  "cat__StreamingMovies_No",
+  "cat__Contract_Month-to-month",
+  "cat__PaperlessBilling_Yes",
+  "cat__PaymentMethod_Bank transfer (automatic)",
+  "cat__PaymentMethod_Credit card (automatic)",
+  "cat__PaymentMethod_Electronic check",
+  "cat__PaymentMethod_Mailed check",
+  "cat__tenure_group_13-24ay",
+  "cat__tenure_group_60ay+"
+]
