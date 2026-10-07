@@ -1,24 +1,18 @@
-"""
-Değerlendirme: metrikler, threshold tuning, model karşılaştırması.
-"""
+"""Metrics, threshold choice and plots."""
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
+from sklearn.base import clone
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
 
 def evaluate_at_threshold(y_true, y_proba, threshold: float = 0.5) -> dict:
     y_pred = (y_proba >= threshold).astype(int)
     return {
-        "threshold": threshold,
+        "threshold": round(float(threshold), 2),
         "recall": recall_score(y_true, y_pred),
         "precision": precision_score(y_true, y_pred, zero_division=0),
         "f1": f1_score(y_true, y_pred, zero_division=0),
@@ -28,39 +22,37 @@ def evaluate_at_threshold(y_true, y_proba, threshold: float = 0.5) -> dict:
 
 
 def threshold_scan(y_true, y_proba, thresholds=None) -> pd.DataFrame:
-    """Farklı threshold değerlerinde recall/precision/F1 trade-off'unu tarar."""
     if thresholds is None:
-        thresholds = np.arange(0.10, 0.65, 0.05)
-    rows = [evaluate_at_threshold(y_true, y_proba, t) for t in thresholds]
-    return pd.DataFrame(rows)
+        thresholds = np.round(np.arange(0.10, 0.91, 0.05), 2)
+    return pd.DataFrame([evaluate_at_threshold(y_true, y_proba, t) for t in thresholds])
 
 
-def best_threshold_for_f1(y_true, y_proba, thresholds=None) -> dict:
+def oof_proba(estimator, X_train, y_train, cv: int = 5, random_state: int = 42) -> np.ndarray:
+    """Out-of-fold probabilities on the training set, used to pick the threshold
+    so the test set is not used for it."""
+    folds = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+    return cross_val_predict(clone(estimator), X_train, y_train, cv=folds, method="predict_proba")[:, 1]
+
+
+def best_threshold_for_f1(y_true, y_proba, thresholds=None) -> float:
     scan = threshold_scan(y_true, y_proba, thresholds)
-    return scan.loc[scan["f1"].idxmax()].to_dict()
+    return float(scan.loc[scan["f1"].idxmax(), "threshold"])
 
 
 def compare_models(model_results: dict, X_test, y_test) -> pd.DataFrame:
-    """Her modelin test setindeki (default 0.5 threshold) metriklerini
-    tek bir tabloda karşılaştırır."""
+    """Test set metrics of each model at threshold 0.5."""
     rows = []
-    for name, result in model_results.items():
-        estimator = result.best_estimator
-        y_proba = estimator.predict_proba(X_test)[:, 1]
-        metrics = evaluate_at_threshold(y_test, y_proba, threshold=0.5)
-        metrics["model"] = name
-        metrics["cv_f1"] = result.best_cv_f1
-        rows.append(metrics)
-    return pd.DataFrame(rows).set_index("model")[
-        ["cv_f1", "auc", "recall", "precision", "f1", "accuracy", "threshold"]
-    ]
+    for name, res in model_results.items():
+        m = evaluate_at_threshold(y_test, res.best_estimator.predict_proba(X_test)[:, 1], 0.5)
+        m.update(model=name, cv_f1=res.best_cv_f1)
+        rows.append(m)
+    return pd.DataFrame(rows).set_index("model")[["cv_f1", "auc", "recall", "precision", "f1", "accuracy"]]
 
 
 def plot_model_comparison(comparison_df: pd.DataFrame, save_path: str | None = None):
-    metrics_to_plot = ["recall", "precision", "f1", "auc"]
-    ax = comparison_df[metrics_to_plot].plot(kind="bar", figsize=(9, 5))
-    ax.set_ylabel("Skor")
-    ax.set_title("Model Karşılaştırması (test seti, threshold=0.5)")
+    ax = comparison_df[["recall", "precision", "f1", "auc"]].plot(kind="bar", figsize=(9, 5))
+    ax.set_ylabel("score")
+    ax.set_title("Test set, threshold = 0.5")
     ax.set_ylim(0, 1)
     ax.legend(loc="lower right")
     plt.xticks(rotation=0)
@@ -70,10 +62,12 @@ def plot_model_comparison(comparison_df: pd.DataFrame, save_path: str | None = N
     return ax
 
 
-def plot_threshold_tradeoff(scan_df: pd.DataFrame, save_path: str | None = None):
+def plot_threshold_tradeoff(scan_df: pd.DataFrame, chosen: float | None = None, save_path: str | None = None):
     ax = scan_df.plot(x="threshold", y=["recall", "precision", "f1"], figsize=(8, 5))
-    ax.set_ylabel("Skor")
-    ax.set_title("Threshold - Recall/Precision/F1 Trade-off")
+    if chosen is not None:
+        ax.axvline(chosen, color="grey", ls="--", lw=1)
+    ax.set_ylabel("score")
+    ax.set_title("Threshold vs recall / precision / F1 (out-of-fold, train)")
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150)

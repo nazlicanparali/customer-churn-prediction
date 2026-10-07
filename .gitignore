@@ -5,22 +5,17 @@ __pycache__/
 venv/
 env/
 .DS_Store
+.pytest_cache/
+.env
 
-# Ham veriyi repoya koymuyoruz (Kaggle lisansına dikkat) - indirme talimatı README'de
+# data is downloaded from Kaggle, see README
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
 
-# Büyük model dosyaları
 models/*.pkl
 models/*.cbm
 !models/.gitkeep
 
-.env
-
-# CatBoost eğitim sırasında oluşturduğu log klasörü
 catboost_info/
-
-# pytest cache
-.pytest_cache/

@@ -1,6 +1,4 @@
-"""
-Uçtan uca pipeline'ı çalıştırır ve sonuçları reports/ + models/ altına
-kaydeder. Kullanım:
+"""Runs the whole pipeline and writes the results to reports/ and models/.
 
     python scripts/run_pipeline.py
 """
@@ -8,25 +6,27 @@ from __future__ import annotations
 
 import json
 import pickle
+import sys
 import time
 import warnings
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-from imblearn.over_sampling import SMOTE
-from imblearn.pipeline import Pipeline as ImbPipeline
-from sklearn.linear_model import LogisticRegression
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-from src import eda, evaluation as ev, feature_selection as fs, leakage, modeling as md
-from src import preprocessing as pp
-from src.data_loading import ID_COL, TARGET_COL, load_clean
+from imblearn.over_sampling import SMOTE  # noqa: E402
+from imblearn.pipeline import Pipeline as ImbPipeline  # noqa: E402
+from sklearn.linear_model import LogisticRegression  # noqa: E402
+
+from src import eda, evaluation as ev, feature_selection as fs, leakage, modeling as md  # noqa: E402
+from src import preprocessing as pp  # noqa: E402
+from src.data_loading import ID_COL, TARGET_COL, load_clean  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
-REPORTS_DIR = Path("reports")
+REPORTS_DIR = ROOT / "reports"
 FIGURES_DIR = REPORTS_DIR / "figures"
-MODELS_DIR = Path("models")
+MODELS_DIR = ROOT / "models"
 
 
 def main():
@@ -34,118 +34,90 @@ def main():
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("== 1) Veri yükleme + temizlik ==")
-    df = load_clean()
-    df = pp.engineer_features(df)
-    print(f"shape: {df.shape}, churn oranı: {df[TARGET_COL].mean():.4f}")
-
+    print("1) load + clean")
+    df = pp.engineer_features(load_clean())
+    print(f"   {df.shape}, churn rate {df[TARGET_COL].mean():.4f}")
     num_cols, cat_cols = pp.get_feature_lists(df, TARGET_COL, ID_COL)
     feature_cols = num_cols + cat_cols
 
-    print("\n== 2) EDA: missing/constant, cardinality, target association ==")
-    mc_report = eda.missing_constant_report(df)
-    card_report = eda.cardinality_report(df, exclude=[ID_COL])
+    print("2) EDA tables")
+    eda.missing_constant_report(df).to_csv(REPORTS_DIR / "missing_constant_report.csv")
+    eda.cardinality_report(df, exclude=[ID_COL]).to_csv(REPORTS_DIR / "cardinality_report.csv")
     cat_assoc = eda.categorical_target_association(df, cat_cols, TARGET_COL)
-    num_assoc = eda.numeric_target_association(df, num_cols, TARGET_COL)
-    corr_pairs = eda.high_correlation_pairs(df, num_cols, threshold=0.85)
-
-    mc_report.to_csv(REPORTS_DIR / "missing_constant_report.csv")
-    card_report.to_csv(REPORTS_DIR / "cardinality_report.csv")
     cat_assoc.to_csv(REPORTS_DIR / "categorical_target_association.csv")
-    num_assoc.to_csv(REPORTS_DIR / "numeric_target_association.csv")
-    corr_pairs.to_csv(REPORTS_DIR / "high_correlation_pairs.csv", index=False)
-    print("Kategorik ilişki (Cramér's V), en güçlü 3:")
+    eda.numeric_target_association(df, num_cols, TARGET_COL).to_csv(REPORTS_DIR / "numeric_target_association.csv")
+    eda.high_correlation_pairs(df, num_cols, 0.85).to_csv(REPORTS_DIR / "high_correlation_pairs.csv", index=False)
     print(cat_assoc.head(3))
 
-    print("\n== 3) Leakage testi (ablation) ==")
+    print("3) leakage checks")
     sf_auc = leakage.single_feature_auc(df, feature_cols, TARGET_COL, cv=5)
     ablation = leakage.ablation_drop(df, feature_cols, TARGET_COL, cv=5)
     sf_auc.to_csv(REPORTS_DIR / "leakage_single_feature_auc.csv")
     ablation.to_csv(REPORTS_DIR / "leakage_ablation_drop.csv")
-    print(f"baseline AUC: {ablation.attrs['baseline_auc']:.4f}")
-    print("En yüksek solo AUC:", sf_auc.iloc[0].to_dict())
-    print("=> Leakage şüphesi: HAYIR (hiçbir kolon tek başına anormal derecede yüksek AUC vermiyor)")
+    print(f"   baseline AUC {ablation.attrs['baseline_auc']:.4f}, "
+          f"highest single-column AUC {sf_auc.index[0]} = {sf_auc.iloc[0, 0]:.3f}")
 
-    print("\n== 4) Train/test split (stratified, 75/25, seed=42) ==")
+    print("4) split + encode")
     train_df, test_df = pp.stratified_split(df, TARGET_COL)
-    X_train = train_df.drop(columns=[TARGET_COL, ID_COL])
-    y_train = train_df[TARGET_COL]
-    X_test = test_df.drop(columns=[TARGET_COL, ID_COL])
-    y_test = test_df[TARGET_COL]
-    print(f"train: {X_train.shape}, test: {X_test.shape}")
-
-    print("\n== 5) Encoding (ColumnTransformer: StandardScaler + OneHotEncoder) ==")
+    X_train, y_train = train_df.drop(columns=[TARGET_COL, ID_COL]), train_df[TARGET_COL]
+    X_test, y_test = test_df.drop(columns=[TARGET_COL, ID_COL]), test_df[TARGET_COL]
     preprocessor = pp.build_preprocessor(num_cols, cat_cols)
     X_train_enc, X_test_enc, feat_names = fs.encode_full(preprocessor, X_train, X_test)
-    print(f"encoded shape: {X_train_enc.shape}")
+    print(f"   train {X_train_enc.shape}, test {X_test_enc.shape}")
 
-    print("\n== 6) Feature Selection (Genetik Algoritma, proxy=LogisticRegression) ==")
-    ga_estimator = ImbPipeline(
-        [("smote", SMOTE(random_state=42)), ("clf", LogisticRegression(max_iter=1000))]
-    )
-    ga = fs.run_ga_feature_selection(
-        X_train_enc, y_train, ga_estimator,
-        population_size=10, generations=8, cv=5, scoring="f1",
-    )
+    print("5) GA feature selection (logistic regression as the fast model)")
+    ga_estimator = ImbPipeline([("smote", SMOTE(random_state=42)), ("clf", LogisticRegression(max_iter=1000))])
+    ga = fs.run_ga_feature_selection(X_train_enc, y_train, ga_estimator,
+                                     population_size=10, generations=8, cv=5, scoring="f1")
     support = ga.support_
-    selected_names = fs.selected_feature_names(ga, feat_names)
-    print(f"{support.sum()} / {len(feat_names)} feature seçildi:")
-    print(selected_names)
+    selected = fs.selected_feature_names(ga, feat_names)
+    print(f"   {support.sum()} / {len(feat_names)} features kept")
     with open(REPORTS_DIR / "selected_features.json", "w") as f:
-        json.dump(selected_names, f, ensure_ascii=False, indent=2)
+        json.dump(selected, f, indent=2)
+    X_train_sel, X_test_sel = X_train_enc[:, support], X_test_enc[:, support]
 
-    X_train_sel = X_train_enc[:, support]
-    X_test_sel = X_test_enc[:, support]
-
-    print("\n== 7) Çoklu model eğitimi (SMOTE train-only + RandomizedSearchCV, F1 objective) ==")
+    print("6) models")
     results = md.train_all_models(X_train_sel, y_train, n_iter=25, cv=5)
 
-    print("\n== 8) Model karşılaştırma (test seti) ==")
+    print("7) test set")
     comparison = ev.compare_models(results, X_test_sel, y_test)
     comparison.to_csv(REPORTS_DIR / "model_comparison.csv")
-    print(comparison)
+    print(comparison.round(3))
     ev.plot_model_comparison(comparison, save_path=str(FIGURES_DIR / "model_comparison.png"))
 
-    best_model_name = comparison["f1"].idxmax()
-    best_result = results[best_model_name]
-    print(f"\nEn iyi model (test F1'e göre): {best_model_name}")
+    # pick the model by CV F1, not by test F1
+    best_name = comparison["cv_f1"].idxmax()
+    best = results[best_name]
 
-    print("\n== 9) Threshold tuning (kazanan model) ==")
-    y_proba_best = best_result.best_estimator.predict_proba(X_test_sel)[:, 1]
-    scan = ev.threshold_scan(y_test, y_proba_best)
+    print(f"8) threshold for {best_name} (out-of-fold on train)")
+    oof = ev.oof_proba(best.best_estimator, X_train_sel, y_train)
+    scan = ev.threshold_scan(y_train, oof)
+    thr = ev.best_threshold_for_f1(y_train, oof)
     scan.to_csv(REPORTS_DIR / "threshold_scan.csv", index=False)
-    ev.plot_threshold_tradeoff(scan, save_path=str(FIGURES_DIR / "threshold_tradeoff.png"))
-    best_thr_row = ev.best_threshold_for_f1(y_test, y_proba_best)
-    print("F1-optimal threshold:", best_thr_row)
+    ev.plot_threshold_tradeoff(scan, chosen=thr, save_path=str(FIGURES_DIR / "threshold_tradeoff.png"))
+    test_proba = best.best_estimator.predict_proba(X_test_sel)[:, 1]
+    test_at_thr = ev.evaluate_at_threshold(y_test, test_proba, thr)
+    print(f"   threshold {thr}: {test_at_thr}")
 
-    print("\n== 10) Kazanan modeli kaydet ==")
-    with open(MODELS_DIR / f"best_model_{best_model_name}.pkl", "wb") as f:
-        pickle.dump(
-            {
-                "model": best_result.best_estimator,
-                "preprocessor": preprocessor,
-                "selected_feature_mask": support,
-                "feature_names": feat_names,
-                "params": best_result.best_params,
-            },
-            f,
-        )
+    with open(MODELS_DIR / f"best_model_{best_name}.pkl", "wb") as f:
+        pickle.dump({"model": best.best_estimator, "preprocessor": preprocessor,
+                     "selected_feature_mask": support, "feature_names": feat_names,
+                     "threshold": thr, "params": best.best_params}, f)
 
     summary = {
-        "best_model": best_model_name,
-        "best_model_params": best_result.best_params,
-        "cv_f1": best_result.best_cv_f1,
-        "test_metrics_default_threshold": comparison.loc[best_model_name].to_dict(),
-        "f1_optimal_threshold": best_thr_row,
-        "n_features_total_encoded": int(len(feat_names)),
+        "best_model": best_name,
+        "best_model_params": best.best_params,
+        "cv_f1": best.best_cv_f1,
+        "test_at_0.5": comparison.loc[best_name].to_dict(),
+        "chosen_threshold": thr,
+        "test_at_chosen_threshold": test_at_thr,
+        "n_features_encoded": int(len(feat_names)),
         "n_features_selected": int(support.sum()),
         "runtime_seconds": round(time.time() - t0, 1),
     }
     with open(REPORTS_DIR / "run_summary.json", "w") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
-
-    print(f"\nToplam süre: {summary['runtime_seconds']} sn")
-    print("Tüm raporlar reports/ klasörüne kaydedildi.")
+        json.dump(summary, f, indent=2, default=str)
+    print(f"done in {summary['runtime_seconds']} s")
 
 
 if __name__ == "__main__":
